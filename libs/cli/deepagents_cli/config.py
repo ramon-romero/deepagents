@@ -589,7 +589,7 @@ def create_model(model_name_override: str | None = None) -> BaseChatModel:
     if provider == "openai":
         from langchain_openai import ChatOpenAI
 
-        return ChatOpenAI(model=model_name)
+        return ChatOpenAI(model=model_name, use_responses_api=True)
     if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
 
