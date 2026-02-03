@@ -371,6 +371,11 @@ class Settings:
     google_api_key: str | None
     tavily_api_key: str | None
 
+    # AWS credentials (Bedrock)
+    aws_access_key_id: str | None
+    aws_secret_access_key: str | None
+    aws_region: str | None
+
     # Google Cloud configuration (for VertexAI)
     google_cloud_project: str | None
 
@@ -402,6 +407,9 @@ class Settings:
         google_key = os.environ.get("GOOGLE_API_KEY")
         tavily_key = os.environ.get("TAVILY_API_KEY")
         google_cloud_project = os.environ.get("GOOGLE_CLOUD_PROJECT")
+        aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID")
+        aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+        aws_region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
 
         # Detect LangSmith configuration
         # DEEPAGENTS_LANGSMITH_PROJECT: Project for deepagents agent tracing
@@ -419,6 +427,9 @@ class Settings:
             anthropic_api_key=anthropic_key,
             google_api_key=google_key,
             tavily_api_key=tavily_key,
+            aws_access_key_id=aws_access_key_id,
+            aws_secret_access_key=aws_secret_access_key,
+            aws_region=aws_region,
             google_cloud_project=google_cloud_project,
             deepagents_langchain_project=deepagents_langchain_project,
             user_langchain_project=user_langchain_project,
@@ -439,6 +450,15 @@ class Settings:
     def has_google(self) -> bool:
         """Check if Google API key is configured."""
         return self.google_api_key is not None
+
+    @property
+    def has_bedrock(self) -> bool:
+        """Check if AWS Bedrock credentials are configured."""
+        return (
+            self.aws_access_key_id is not None
+            and self.aws_secret_access_key is not None
+            and self.aws_region is not None
+        )
 
     @property
     def has_vertex_ai(self) -> bool:
@@ -723,6 +743,8 @@ def _detect_provider(model_name: str) -> str | None:
     model_lower = model_name.lower()
 
     # Check for model name patterns
+    if model_lower.startswith("bedrock:"):
+        return "bedrock"
     if any(x in model_lower for x in ["gpt", "o1", "o3"]):
         return "openai"
     if "claude" in model_lower:
@@ -783,6 +805,12 @@ def create_model(model_name_override: str | None = None) -> BaseChatModel:
                 "requires ANTHROPIC_API_KEY"
             )
             sys.exit(1)
+        elif provider == "bedrock" and not settings.has_bedrock:
+            console.print(
+                f"[bold red]Error:[/bold red] Model '{model_name_override}' "
+                "requires AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_REGION"
+            )
+            sys.exit(1)
         elif provider == "google" and not settings.has_google:
             console.print(
                 f"[bold red]Error:[/bold red] Model '{model_name_override}' "
@@ -801,6 +829,11 @@ def create_model(model_name_override: str | None = None) -> BaseChatModel:
 
         model_name = model_name_override
     # Use environment variable defaults, detect provider by API key priority
+    elif settings.has_bedrock and os.environ.get("BEDROCK_MODEL"):
+        provider = "bedrock"
+        model_name = os.environ.get(
+            "BEDROCK_MODEL", "bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+        )
     elif settings.has_openai:
         provider = "openai"
         model_name = os.environ.get("OPENAI_MODEL", "gpt-5.2")
@@ -819,6 +852,7 @@ def create_model(model_name_override: str | None = None) -> BaseChatModel:
         console.print("  - OPENAI_API_KEY     (for OpenAI models like gpt-5.2)")
         console.print("  - ANTHROPIC_API_KEY  (for Claude models)")
         console.print("  - GOOGLE_API_KEY     (for Google Gemini models)")
+        console.print("  - AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_REGION (for Bedrock models)")
         console.print(
             "  - GOOGLE_CLOUD_PROJECT (for VertexAI models, "
             "with Application Default Credentials)"
@@ -844,6 +878,16 @@ def create_model(model_name_override: str | None = None) -> BaseChatModel:
         model = ChatAnthropic(
             model_name=model_name,
             max_tokens=20_000,
+        )
+    elif provider == "bedrock":
+        from langchain_aws import ChatBedrock
+
+        bedrock_model_id = model_name
+        if bedrock_model_id.lower().startswith("bedrock:"):
+            bedrock_model_id = bedrock_model_id.split(":", 1)[1]
+
+        model = ChatBedrock(
+            model_id=bedrock_model_id,
         )
     elif provider == "google":
         from langchain_google_genai import ChatGoogleGenerativeAI
