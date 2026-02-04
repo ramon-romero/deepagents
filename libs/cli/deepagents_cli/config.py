@@ -966,8 +966,10 @@ def create_model(model_name_override: str | None = None) -> BaseChatModel:
         thinking_enabled = _parse_bool_env("BEDROCK_THINKING")
         thinking_budget = _parse_int_env("BEDROCK_THINKING_BUDGET", 4096)
 
-        if temperature is None:
+        if temperature is None and top_p is None:
             temperature = 0.3
+        if temperature is not None and top_p is not None:
+            top_p = None
         if thinking_enabled:
             temperature = 1.0
             top_p = None
