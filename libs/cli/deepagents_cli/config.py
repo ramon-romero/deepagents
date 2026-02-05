@@ -1,10 +1,13 @@
 """Configuration, constants, and model creation for the CLI."""
 
+import json
 import os
 import re
 import sys
 import uuid
 from dataclasses import dataclass
+from enum import StrEnum
+from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 
 import dotenv
@@ -23,8 +26,9 @@ if _deepagents_project:
     # Override LANGSMITH_PROJECT for agent traces
     os.environ["LANGSMITH_PROJECT"] = _deepagents_project
 
-# Now safe to import LangChain modules
+# E402: Now safe to import LangChain modules
 from langchain_core.language_models import BaseChatModel  # noqa: E402
+from langchain_core.runnables import RunnableConfig  # noqa: E402
 
 # Color scheme
 COLORS = {
@@ -36,31 +40,240 @@ COLORS = {
     "tool": "#fbbf24",
 }
 
-# ASCII art banner
 
-DEEP_AGENTS_ASCII = f"""
- ██████╗  ███████╗ ███████╗ ██████╗
- ██╔══██╗ ██╔════╝ ██╔════╝ ██╔══██╗
- ██║  ██║ █████╗   █████╗   ██████╔╝
- ██║  ██║ ██╔══╝   ██╔══╝   ██╔═══╝
- ██████╔╝ ███████╗ ███████╗ ██║
- ╚═════╝  ╚══════╝ ╚══════╝ ╚═╝
+# Charset mode configuration
+class CharsetMode(StrEnum):
+    """Character set mode for TUI display."""
 
-  █████╗   ██████╗  ███████╗ ███╗   ██╗ ████████╗ ███████╗
- ██╔══██╗ ██╔════╝  ██╔════╝ ████╗  ██║ ╚══██╔══╝ ██╔════╝
- ███████║ ██║  ███╗ █████╗   ██╔██╗ ██║    ██║    ███████╗
- ██╔══██║ ██║   ██║ ██╔══╝   ██║╚██╗██║    ██║    ╚════██║
- ██║  ██║ ╚██████╔╝ ███████╗ ██║ ╚████║    ██║    ███████║
- ╚═╝  ╚═╝  ╚═════╝  ╚══════╝ ╚═╝  ╚═══╝    ╚═╝    ╚══════╝
-                                              v{__version__}
+    UNICODE = "unicode"
+    ASCII = "ascii"
+    AUTO = "auto"
+
+
+@dataclass(frozen=True)
+class Glyphs:
+    """Character glyphs for TUI display."""
+
+    tool_prefix: str  # ⏺ vs (*)
+    ellipsis: str  # … vs ...
+    checkmark: str  # ✓ vs [OK]
+    error: str  # ✗ vs [X]
+    circle_empty: str  # ○ vs [ ]
+    circle_filled: str  # ● vs [*]
+    output_prefix: str  # ⎿ vs L
+    spinner_frames: tuple[str, ...]  # Braille vs ASCII spinner
+    pause: str  # ⏸ vs ||
+    newline: str  # ⏎ vs \\n
+    warning: str  # ⚠ vs [!]
+    arrow_up: str  # up arrow vs ^
+    arrow_down: str  # down arrow vs v
+    bullet: str  # bullet vs -
+    cursor: str  # cursor vs >
+
+    # Box-drawing characters
+    box_vertical: str  # │ vs |
+    box_horizontal: str  # ─ vs -
+    box_double_horizontal: str  # ═ vs =
+
+    # Diff-specific
+    gutter_bar: str  # ▌ vs |
+
+    # Tree connectors (full prefixes for tree display)
+    tree_branch: str  # "├── " vs "+-- "
+    tree_last: str  # "└── " vs "`-- "
+    tree_vertical: str  # "│   " vs "|   "
+
+
+UNICODE_GLYPHS = Glyphs(
+    tool_prefix="⏺",
+    ellipsis="…",
+    checkmark="✓",
+    error="✗",
+    circle_empty="○",
+    circle_filled="●",
+    output_prefix="⎿",
+    spinner_frames=("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"),
+    pause="⏸",
+    newline="⏎",
+    warning="⚠",
+    arrow_up="↑",
+    arrow_down="↓",
+    bullet="•",
+    cursor="›",  # noqa: RUF001
+    # Box-drawing characters
+    box_vertical="│",
+    box_horizontal="─",
+    box_double_horizontal="═",
+    gutter_bar="▌",
+    tree_branch="├── ",
+    tree_last="└── ",
+    tree_vertical="│   ",
+)
+
+ASCII_GLYPHS = Glyphs(
+    tool_prefix="(*)",
+    ellipsis="...",
+    checkmark="[OK]",
+    error="[X]",
+    circle_empty="[ ]",
+    circle_filled="[*]",
+    output_prefix="L",
+    spinner_frames=("(-)", "(\\)", "(|)", "(/)"),
+    pause="||",
+    newline="\\n",
+    warning="[!]",
+    arrow_up="^",
+    arrow_down="v",
+    bullet="-",
+    cursor=">",
+    # Box-drawing characters
+    box_vertical="|",
+    box_horizontal="-",
+    box_double_horizontal="=",
+    gutter_bar="|",
+    tree_branch="+-- ",
+    tree_last="`-- ",
+    tree_vertical="|   ",
+)
+
+# Module-level cache for detected glyphs
+_glyphs_cache: Glyphs | None = None
+
+# Module-level cache for editable install detection
+_editable_cache: bool | None = None
+
+
+def _is_editable_install() -> bool:
+    """Check if deepagents-cli is installed in editable mode.
+
+    Uses PEP 610 direct_url.json metadata to detect editable installs.
+
+    Returns:
+        True if installed in editable mode, False otherwise.
+    """
+    global _editable_cache  # noqa: PLW0603
+    if _editable_cache is not None:
+        return _editable_cache
+
+    try:
+        dist = distribution("deepagents-cli")
+        direct_url = dist.read_text("direct_url.json")
+        if direct_url:
+            data = json.loads(direct_url)
+            _editable_cache = data.get("dir_info", {}).get("editable", False)
+        else:
+            _editable_cache = False
+    except (PackageNotFoundError, FileNotFoundError, json.JSONDecodeError, TypeError):
+        _editable_cache = False
+
+    return _editable_cache
+
+
+def _detect_charset_mode() -> CharsetMode:
+    """Auto-detect terminal charset capabilities.
+
+    Returns:
+        The detected CharsetMode based on environment and terminal encoding.
+    """
+    env_mode = os.environ.get("UI_CHARSET_MODE", "auto").lower()
+    if env_mode == "unicode":
+        return CharsetMode.UNICODE
+    if env_mode == "ascii":
+        return CharsetMode.ASCII
+
+    # Auto: check stdout encoding and LANG
+    encoding = getattr(sys.stdout, "encoding", "") or ""
+    if "utf" in encoding.lower():
+        return CharsetMode.UNICODE
+    lang = os.environ.get("LANG", "") or os.environ.get("LC_ALL", "")
+    if "utf" in lang.lower():
+        return CharsetMode.UNICODE
+    return CharsetMode.ASCII
+
+
+def get_glyphs() -> Glyphs:
+    """Get the glyph set for the current charset mode.
+
+    Returns:
+        The appropriate Glyphs instance based on charset mode detection.
+    """
+    global _glyphs_cache  # noqa: PLW0603
+    if _glyphs_cache is not None:
+        return _glyphs_cache
+
+    mode = _detect_charset_mode()
+    _glyphs_cache = ASCII_GLYPHS if mode == CharsetMode.ASCII else UNICODE_GLYPHS
+    return _glyphs_cache
+
+
+def reset_glyphs_cache() -> None:
+    """Reset the glyphs cache (for testing)."""
+    global _glyphs_cache  # noqa: PLW0603
+    _glyphs_cache = None
+
+
+# Text art banners (Unicode and ASCII variants)
+
+_UNICODE_BANNER = f"""
+██████╗  ███████╗ ███████╗ ██████╗
+██╔══██╗ ██╔════╝ ██╔════╝ ██╔══██╗
+██║  ██║ █████╗   █████╗   ██████╔╝
+██║  ██║ ██╔══╝   ██╔══╝   ██╔═══╝
+██████╔╝ ███████╗ ███████╗ ██║
+╚═════╝  ╚══════╝ ╚══════╝ ╚═╝
+
+ █████╗   ██████╗  ███████╗ ███╗   ██╗ ████████╗ ███████╗
+██╔══██╗ ██╔════╝  ██╔════╝ ████╗  ██║ ╚══██╔══╝ ██╔════╝
+███████║ ██║  ███╗ █████╗   ██╔██╗ ██║    ██║    ███████╗
+██╔══██║ ██║   ██║ ██╔══╝   ██║╚██╗██║    ██║    ╚════██║
+██║  ██║ ╚██████╔╝ ███████╗ ██║ ╚████║    ██║    ███████║
+╚═╝  ╚═╝  ╚═════╝  ╚══════╝ ╚═╝  ╚═══╝    ╚═╝    ╚══════╝
+                                                  v{__version__}
 """
+
+_ASCII_BANNER = f"""
+ ____  ____  ____  ____
+|  _ \\| ___|| ___||  _ \\
+| | | | |_  | |_  | |_) |
+| |_| |  _| |  _| |  __/
+|____/|____||____||_|
+
+    _    ____  ____  _   _  _____  ____
+   / \\  / ___|| ___|| \\ | ||_   _|/ ___|
+  / _ \\| |  _ | |_  |  \\| |  | |  \\___ \\
+ / ___ \\ |_| ||  _| | |\\  |  | |   ___) |
+/_/   \\_\\____||____||_| \\_|  |_|  |____/
+                                  v{__version__}
+"""
+
+
+def get_banner() -> str:
+    """Get the appropriate banner for the current charset mode.
+
+    Returns:
+        The text art banner string (Unicode or ASCII based on charset mode).
+        Includes "(local install)" suffix when installed in editable mode.
+    """
+    if _detect_charset_mode() == CharsetMode.ASCII:
+        banner = _ASCII_BANNER
+    else:
+        banner = _UNICODE_BANNER
+
+    if _is_editable_install():
+        banner = banner.replace(f"v{__version__}", f"v{__version__} (local install)")
+
+    return banner
+
+
+# Legacy alias for backwards compatibility
+DEEP_AGENTS_ASCII = _UNICODE_BANNER
 
 # Interactive commands
 COMMANDS = {
     "clear": "Clear screen and reset conversation",
     "help": "Show help information",
     "remember": "Review conversation and update memory/skills",
-    "tokens": "Show token usage for current session",
+    "tokens": "Show token usage for current thread",
     "quit": "Exit the CLI",
     "exit": "Exit the CLI",
 }
@@ -70,70 +283,10 @@ COMMANDS = {
 MAX_ARG_LENGTH = 150
 
 # Agent configuration
-config = {"recursion_limit": 1000}
+config: RunnableConfig = {"recursion_limit": 1000}
 
 # Rich console instance
 console = Console(highlight=False)
-
-def _parse_int_env(var_name: str, default: int) -> int:
-    value = os.environ.get(var_name)
-    if value is None or value.strip() == "":
-        return default
-    try:
-        return int(value)
-    except ValueError:
-        return default
-
-
-def _parse_float_env(var_name: str) -> float | None:
-    value = os.environ.get(var_name)
-    if value is None or value.strip() == "":
-        return None
-    try:
-        return float(value)
-    except ValueError:
-        return None
-
-def _parse_optional_int_env(var_name: str) -> int | None:
-    value = os.environ.get(var_name)
-    if value is None or value.strip() == "":
-        return None
-    try:
-        return int(value)
-    except ValueError:
-        return None
-
-def _parse_list_env(var_name: str) -> list[str] | None:
-    value = os.environ.get(var_name)
-    if value is None or value.strip() == "":
-        return None
-    value = value.strip()
-    if value.startswith("["):
-        import json
-
-        try:
-            data = json.loads(value)
-        except json.JSONDecodeError:
-            return None
-        if isinstance(data, list) and all(isinstance(x, str) for x in data):
-            return data
-        return None
-    if "|" in value:
-        parts = [p.strip() for p in value.split("|") if p.strip()]
-    else:
-        parts = [p.strip() for p in value.split(",") if p.strip()]
-    return parts or None
-
-def _parse_bool_env(var_name: str) -> bool | None:
-    value = os.environ.get(var_name)
-    if value is None or value.strip() == "":
-        return None
-    value = value.strip().lower()
-    if value in {"1", "true", "yes", "on", "enabled"}:
-        return True
-    if value in {"0", "false", "no", "off", "disabled"}:
-        return False
-    return None
 
 
 
@@ -504,6 +657,37 @@ class Settings:
             return None
         return self.project_root / ".deepagents" / "agents"
 
+    @property
+    def user_agents_dir(self) -> Path:
+        """Get the base user-level `.agents` directory (`~/.agents`).
+
+        Returns:
+            Path to `~/.agents`
+        """
+        return Path.home() / ".agents"
+
+    def get_user_agent_skills_dir(self) -> Path:
+        """Get user-level `~/.agents/skills/` directory.
+
+        This is a generic alias path for skills that is tool-agnostic.
+
+        Returns:
+            Path to `~/.agents/skills/`
+        """
+        return self.user_agents_dir / "skills"
+
+    def get_project_agent_skills_dir(self) -> Path | None:
+        """Get project-level `.agents/skills/` directory.
+
+        This is a generic alias path for skills that is tool-agnostic.
+
+        Returns:
+            Path to `{project_root}/.agents/skills/`, or `None` if not in a project
+        """
+        if not self.project_root:
+            return None
+        return self.project_root / ".agents" / "skills"
+
 
 # Global settings instance (initialized once)
 settings = Settings.from_environment()
@@ -555,7 +739,7 @@ def _detect_provider(model_name: str) -> str | None:
         model_name: Model name to detect provider from
 
     Returns:
-        Provider name (openai, anthropic, google, vertexai) or None if can't detect
+        Provider name (openai, anthropic, google, vertexai, bedrock) or None if can't detect
     """
     model_lower = model_name.lower()
 
@@ -602,6 +786,7 @@ def create_model(model_name_override: str | None = None) -> BaseChatModel:
             console.print("\nSupported model name patterns:")
             console.print("  - OpenAI: gpt-*, o1-*, o3-*")
             console.print("  - Anthropic: claude-*")
+            console.print("  - Bedrock: bedrock:* (requires AWS creds)")
             console.print("  - Google: gemini-* (requires GOOGLE_API_KEY)")
             console.print(
                 "  - VertexAI: claude-*/gemini-* (requires GOOGLE_CLOUD_PROJECT, "
@@ -647,9 +832,11 @@ def create_model(model_name_override: str | None = None) -> BaseChatModel:
         model_name = model_name_override
     # Use environment variable defaults, detect provider by API key priority
     elif settings.has_bedrock and os.environ.get("BEDROCK_MODEL"):
+        from deepagents_cli.providers import bedrock as bedrock_provider
+
         provider = "bedrock"
         model_name = os.environ.get(
-            "BEDROCK_MODEL", "bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+            "BEDROCK_MODEL", bedrock_provider.DEFAULT_BEDROCK_MODEL
         )
     elif settings.has_openai:
         provider = "openai"
@@ -668,6 +855,7 @@ def create_model(model_name_override: str | None = None) -> BaseChatModel:
         console.print("\nPlease set one of the following environment variables:")
         console.print("  - OPENAI_API_KEY     (for OpenAI models like gpt-5.2)")
         console.print("  - ANTHROPIC_API_KEY  (for Claude models)")
+        console.print("  - AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_REGION (for Bedrock)")
         console.print("  - GOOGLE_API_KEY     (for Google Gemini models)")
         console.print("  - AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_REGION (for Bedrock models)")
         console.print(
@@ -697,69 +885,9 @@ def create_model(model_name_override: str | None = None) -> BaseChatModel:
             max_tokens=20_000,
         )
     elif provider == "bedrock":
-        from langchain_aws import ChatBedrock
-        from langchain_core.rate_limiters import InMemoryRateLimiter
-        from botocore.config import Config as BotocoreConfig
+        from deepagents_cli.providers import bedrock as bedrock_provider
 
-        bedrock_model_id = model_name
-        if bedrock_model_id.lower().startswith("bedrock:"):
-            bedrock_model_id = bedrock_model_id.split(":", 1)[1]
-
-        retry_mode = os.environ.get("BEDROCK_RETRY_MODE") or os.environ.get(
-            "AWS_RETRY_MODE", "adaptive"
-        )
-        max_attempts = _parse_int_env(
-            "BEDROCK_MAX_ATTEMPTS", _parse_int_env("AWS_MAX_ATTEMPTS", 3)
-        )
-        max_pool_connections = _parse_int_env("BEDROCK_MAX_POOL_CONNECTIONS", 10)
-        requests_per_second = _parse_float_env("DEEPAGENTS_BEDROCK_RPS")
-        max_bucket_size = _parse_float_env("DEEPAGENTS_BEDROCK_BURST")
-        temperature = _parse_float_env("BEDROCK_TEMPERATURE")
-        max_tokens = _parse_int_env("BEDROCK_MAX_TOKENS", 1024)
-        top_p = _parse_float_env("BEDROCK_TOP_P")
-        top_k = _parse_optional_int_env("BEDROCK_TOP_K")
-        stop_sequences = _parse_list_env("BEDROCK_STOP")
-        thinking_enabled = _parse_bool_env("BEDROCK_THINKING")
-        thinking_budget = _parse_int_env("BEDROCK_THINKING_BUDGET", 4096)
-
-        if temperature is None and top_p is None:
-            temperature = 0.3
-        if temperature is not None and top_p is not None:
-            top_p = None
-        if thinking_enabled:
-            temperature = 1.0
-            top_p = None
-            top_k = None
-
-        rate_limiter = None
-        if requests_per_second is not None:
-            rate_limiter = InMemoryRateLimiter(
-                requests_per_second=requests_per_second,
-                max_bucket_size=max_bucket_size or requests_per_second,
-            )
-
-        model_kwargs = {}
-        if top_p is not None:
-            model_kwargs["top_p"] = top_p
-        if top_k is not None:
-            model_kwargs["top_k"] = top_k
-        if thinking_enabled:
-            model_kwargs["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
-
-        bedrock_config = BotocoreConfig(
-            retries={"mode": retry_mode, "max_attempts": max_attempts},
-            max_pool_connections=max_pool_connections,
-        )
-
-        model = ChatBedrock(
-            model_id=bedrock_model_id,
-            config=bedrock_config,
-            rate_limiter=rate_limiter,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            stop=stop_sequences,
-            model_kwargs=model_kwargs or None,
-        )
+        model = bedrock_provider.create_bedrock_model(model_name)
     elif provider == "google":
         from langchain_google_genai import ChatGoogleGenerativeAI
 

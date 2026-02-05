@@ -236,6 +236,50 @@ class TestValidateModelCapabilities:
         mock_console.print.assert_not_called()
 
 
+class TestAgentsAliasDirectories:
+    """Tests for .agents directory alias methods."""
+
+    def test_user_agents_dir(self) -> None:
+        """Test user_agents_dir returns ~/.agents."""
+        from deepagents_cli.config import Settings
+
+        settings = Settings.from_environment()
+        expected = Path.home() / ".agents"
+        assert settings.user_agents_dir == expected
+
+    def test_get_user_agent_skills_dir(self) -> None:
+        """Test get_user_agent_skills_dir returns ~/.agents/skills."""
+        from deepagents_cli.config import Settings
+
+        settings = Settings.from_environment()
+        expected = Path.home() / ".agents" / "skills"
+        assert settings.get_user_agent_skills_dir() == expected
+
+    def test_get_project_agent_skills_dir_with_project(self, tmp_path: Path) -> None:
+        """Test get_project_agent_skills_dir returns .agents/skills in project."""
+        from deepagents_cli.config import Settings
+
+        # Create a mock project with .git
+        project_root = tmp_path / "my-project"
+        project_root.mkdir()
+        (project_root / ".git").mkdir()
+
+        settings = Settings.from_environment(start_path=project_root)
+        expected = project_root / ".agents" / "skills"
+        assert settings.get_project_agent_skills_dir() == expected
+
+    def test_get_project_agent_skills_dir_without_project(self, tmp_path: Path) -> None:
+        """Test get_project_agent_skills_dir returns None when not in a project."""
+        from deepagents_cli.config import Settings
+
+        # Create a directory without .git
+        no_project = tmp_path / "no-project"
+        no_project.mkdir()
+
+        settings = Settings.from_environment(start_path=no_project)
+        assert settings.get_project_agent_skills_dir() is None
+
+
 class TestCreateModelProfileExtraction:
     """Tests for profile extraction in create_model."""
 
@@ -348,3 +392,82 @@ class TestCreateModelProfileExtraction:
             assert settings.model_context_limit is None
         finally:
             self._restore_settings(original)
+
+
+class TestBedrockModelSelection:
+    """Tests for Bedrock provider selection and validation."""
+
+    def setup_method(self) -> None:
+        self._original = {
+            "aws_access_key_id": settings.aws_access_key_id,
+            "aws_secret_access_key": settings.aws_secret_access_key,
+            "aws_region": settings.aws_region,
+            "openai_api_key": settings.openai_api_key,
+            "anthropic_api_key": settings.anthropic_api_key,
+            "google_api_key": settings.google_api_key,
+            "google_cloud_project": settings.google_cloud_project,
+        }
+
+    def teardown_method(self) -> None:
+        settings.aws_access_key_id = self._original["aws_access_key_id"]
+        settings.aws_secret_access_key = self._original["aws_secret_access_key"]
+        settings.aws_region = self._original["aws_region"]
+        settings.openai_api_key = self._original["openai_api_key"]
+        settings.anthropic_api_key = self._original["anthropic_api_key"]
+        settings.google_api_key = self._original["google_api_key"]
+        settings.google_cloud_project = self._original["google_cloud_project"]
+
+    def _enable_bedrock(self) -> None:
+        settings.aws_access_key_id = "key"
+        settings.aws_secret_access_key = "secret"
+        settings.aws_region = "us-east-1"
+        settings.openai_api_key = None
+        settings.anthropic_api_key = None
+        settings.google_api_key = None
+        settings.google_cloud_project = None
+
+    @patch("deepagents_cli.providers.bedrock.create_bedrock_model")
+    def test_bedrock_model_override(self, mock_create: Mock) -> None:
+        """Model override uses Bedrock provider when prefixed."""
+        self._enable_bedrock()
+        mock_model = Mock()
+        mock_create.return_value = mock_model
+
+        model = create_model("bedrock:anthropic.claude-sonnet")
+
+        assert model is mock_model
+        assert settings.model_provider == "bedrock"
+        assert settings.model_name == "bedrock:anthropic.claude-sonnet"
+        mock_create.assert_called_once_with("bedrock:anthropic.claude-sonnet")
+
+    @patch("deepagents_cli.config.console")
+    def test_bedrock_requires_credentials(self, mock_console: Mock) -> None:
+        """Missing Bedrock credentials should exit with an error."""
+        settings.aws_access_key_id = None
+        settings.aws_secret_access_key = None
+        settings.aws_region = None
+        settings.openai_api_key = None
+        settings.anthropic_api_key = None
+        settings.google_api_key = None
+        settings.google_cloud_project = None
+
+        with pytest.raises(SystemExit) as exc_info:
+            create_model("bedrock:anthropic.claude-sonnet")
+
+        assert exc_info.value.code == 1
+        assert mock_console.print.called
+
+    @patch("deepagents_cli.providers.bedrock.create_bedrock_model")
+    def test_bedrock_env_default(self, mock_create: Mock, monkeypatch: pytest.MonkeyPatch) -> None:
+        """BEDROCK_MODEL env should pick Bedrock when credentials exist."""
+        self._enable_bedrock()
+        mock_model = Mock()
+        mock_create.return_value = mock_model
+        monkeypatch.setenv("BEDROCK_MODEL", "bedrock:anthropic.claude-haiku")
+
+        model = create_model()
+
+        assert model is mock_model
+        assert settings.model_provider == "bedrock"
+        assert settings.model_name == "bedrock:anthropic.claude-haiku"
+        mock_create.assert_called_once_with("bedrock:anthropic.claude-haiku")

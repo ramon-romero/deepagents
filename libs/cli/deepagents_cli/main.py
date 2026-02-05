@@ -14,6 +14,7 @@ import contextlib
 import importlib.util
 import os
 import sys
+import traceback
 import warnings
 from pathlib import Path
 
@@ -36,6 +37,7 @@ from deepagents_cli.config import (
 from deepagents_cli.integrations.sandbox_factory import create_sandbox
 from deepagents_cli.sessions import (
     delete_thread_command,
+    find_similar_threads,
     generate_thread_id,
     get_checkpointer,
     get_most_recent,
@@ -86,6 +88,12 @@ def parse_args() -> argparse.Namespace:
         description="Deep Agents - AI Coding Assistant",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         add_help=False,
+    )
+    parser.add_argument(
+        "-h",
+        "--help",
+        action="store_true",
+        help="Show this help message and exit",
     )
     parser.add_argument(
         "--version",
@@ -168,7 +176,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--sandbox",
-        choices=["none", "modal", "daytona", "runloop"],
+        choices=["none", "modal", "daytona", "runloop", "langsmith"],
         default="none",
         help="Remote sandbox for code execution (default: none - local only)",
     )
@@ -199,7 +207,8 @@ async def run_textual_cli_async(
     Args:
         assistant_id: Agent identifier for memory storage
         auto_approve: Whether to auto-approve tool usage
-        sandbox_type: Type of sandbox ("none", "modal", "runloop", "daytona")
+        sandbox_type: Type of sandbox
+            ("none", "modal", "runloop", "daytona", "langsmith")
         sandbox_id: Optional existing sandbox ID to reuse
         model_name: Optional model name to use
         thread_id: Thread ID to use (new or resumed)
@@ -248,8 +257,14 @@ async def run_textual_cli_async(
                 auto_approve=auto_approve,
                 checkpointer=checkpointer,
             )
+        except Exception as e:
+            error_text = Text("❌ Failed to create agent: ", style="red")
+            error_text.append(str(e))
+            console.print(error_text)
+            sys.exit(1)
 
-            # Run Textual app
+        # Run Textual app - errors propagate to caller
+        try:
             await run_textual_app(
                 agent=agent,
                 assistant_id=assistant_id,
@@ -259,13 +274,8 @@ async def run_textual_cli_async(
                 thread_id=thread_id,
                 initial_prompt=initial_prompt,
             )
-        except Exception as e:
-            error_text = Text("❌ Failed to create agent: ", style="red")
-            error_text.append(str(e))
-            console.print(error_text)
-            sys.exit(1)
         finally:
-            # Clean up sandbox if we created one
+            # Clean up sandbox after app exits (success or error)
             if sandbox_cm is not None:
                 with contextlib.suppress(Exception):
                     sandbox_cm.__exit__(None, None, None)
@@ -288,6 +298,11 @@ def cli_main() -> None:
 
     try:
         args = parse_args()
+
+        # Handle -h/--help flag (custom help display)
+        if getattr(args, "help", False):
+            show_help()
+            sys.exit(0)
 
         if args.command == "help":
             show_help()
@@ -350,11 +365,24 @@ def cli_main() -> None:
                     error_msg.append(args.resume_thread)
                     error_msg.append("' not found.", style="red")
                     console.print(error_msg)
-                    hint = (
+
+                    # Check for similar thread IDs
+                    similar = asyncio.run(find_similar_threads(args.resume_thread))
+                    if similar:
+                        console.print()
+                        console.print("[yellow]Did you mean?[/yellow]")
+                        for tid in similar:
+                            console.print(f"  [cyan]deepagents -r {tid}[/cyan]")
+                        console.print()
+
+                    console.print(
                         "[dim]Use 'deepagents threads list' to see "
                         "available threads.[/dim]"
                     )
-                    console.print(hint)
+                    console.print(
+                        "[dim]Use 'deepagents -r' to resume the most "
+                        "recent thread.[/dim]"
+                    )
                     sys.exit(1)
 
             # Generate new thread ID if not resuming
@@ -362,18 +390,29 @@ def cli_main() -> None:
                 thread_id = generate_thread_id()
 
             # Run Textual CLI
-            asyncio.run(
-                run_textual_cli_async(
-                    assistant_id=args.agent,
-                    auto_approve=args.auto_approve,
-                    sandbox_type=args.sandbox,
-                    sandbox_id=args.sandbox_id,
-                    model_name=getattr(args, "model", None),
-                    thread_id=thread_id,
-                    is_resumed=is_resumed,
-                    initial_prompt=getattr(args, "initial_prompt", None),
+            try:
+                asyncio.run(
+                    run_textual_cli_async(
+                        assistant_id=args.agent,
+                        auto_approve=args.auto_approve,
+                        sandbox_type=args.sandbox,
+                        sandbox_id=args.sandbox_id,
+                        model_name=getattr(args, "model", None),
+                        thread_id=thread_id,
+                        is_resumed=is_resumed,
+                        initial_prompt=getattr(args, "initial_prompt", None),
+                    )
                 )
-            )
+            except Exception as e:
+                console.print(f"\n[red]Application error:[/red] {e}")
+                console.print(f"[dim]{traceback.format_exc()}[/dim]")
+                sys.exit(1)
+
+            # Show resume hint on exit (only for new threads)
+            if thread_id and not is_resumed:
+                console.print()
+                console.print("[dim]Resume this thread with:[/dim]")
+                console.print(f"[cyan]deepagents -r {thread_id}[/cyan]")
     except KeyboardInterrupt:
         # Clean exit on Ctrl+C - suppress ugly traceback
         console.print("\n\n[yellow]Interrupted[/yellow]")
