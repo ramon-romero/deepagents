@@ -288,66 +288,6 @@ config: RunnableConfig = {"recursion_limit": 1000}
 # Rich console instance
 console = Console(highlight=False)
 
-def _parse_int_env(var_name: str, default: int) -> int:
-    value = os.environ.get(var_name)
-    if value is None or value.strip() == "":
-        return default
-    try:
-        return int(value)
-    except ValueError:
-        return default
-
-
-def _parse_float_env(var_name: str) -> float | None:
-    value = os.environ.get(var_name)
-    if value is None or value.strip() == "":
-        return None
-    try:
-        return float(value)
-    except ValueError:
-        return None
-
-def _parse_optional_int_env(var_name: str) -> int | None:
-    value = os.environ.get(var_name)
-    if value is None or value.strip() == "":
-        return None
-    try:
-        return int(value)
-    except ValueError:
-        return None
-
-def _parse_list_env(var_name: str) -> list[str] | None:
-    value = os.environ.get(var_name)
-    if value is None or value.strip() == "":
-        return None
-    value = value.strip()
-    if value.startswith("["):
-        import json
-
-        try:
-            data = json.loads(value)
-        except json.JSONDecodeError:
-            return None
-        if isinstance(data, list) and all(isinstance(x, str) for x in data):
-            return data
-        return None
-    if "|" in value:
-        parts = [p.strip() for p in value.split("|") if p.strip()]
-    else:
-        parts = [p.strip() for p in value.split(",") if p.strip()]
-    return parts or None
-
-def _parse_bool_env(var_name: str) -> bool | None:
-    value = os.environ.get(var_name)
-    if value is None or value.strip() == "":
-        return None
-    value = value.strip().lower()
-    if value in {"1", "true", "yes", "on", "enabled"}:
-        return True
-    if value in {"0", "false", "no", "off", "disabled"}:
-        return False
-    return None
-
 
 
 def _find_project_root(start_path: Path | None = None) -> Path | None:
@@ -799,7 +739,7 @@ def _detect_provider(model_name: str) -> str | None:
         model_name: Model name to detect provider from
 
     Returns:
-        Provider name (openai, anthropic, google, vertexai) or None if can't detect
+        Provider name (openai, anthropic, google, vertexai, bedrock) or None if can't detect
     """
     model_lower = model_name.lower()
 
@@ -846,6 +786,7 @@ def create_model(model_name_override: str | None = None) -> BaseChatModel:
             console.print("\nSupported model name patterns:")
             console.print("  - OpenAI: gpt-*, o1-*, o3-*")
             console.print("  - Anthropic: claude-*")
+            console.print("  - Bedrock: bedrock:* (requires AWS creds)")
             console.print("  - Google: gemini-* (requires GOOGLE_API_KEY)")
             console.print(
                 "  - VertexAI: claude-*/gemini-* (requires GOOGLE_CLOUD_PROJECT, "
@@ -891,9 +832,11 @@ def create_model(model_name_override: str | None = None) -> BaseChatModel:
         model_name = model_name_override
     # Use environment variable defaults, detect provider by API key priority
     elif settings.has_bedrock and os.environ.get("BEDROCK_MODEL"):
+        from deepagents_cli.providers import bedrock as bedrock_provider
+
         provider = "bedrock"
         model_name = os.environ.get(
-            "BEDROCK_MODEL", "bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+            "BEDROCK_MODEL", bedrock_provider.DEFAULT_BEDROCK_MODEL
         )
     elif settings.has_openai:
         provider = "openai"
@@ -912,6 +855,7 @@ def create_model(model_name_override: str | None = None) -> BaseChatModel:
         console.print("\nPlease set one of the following environment variables:")
         console.print("  - OPENAI_API_KEY     (for OpenAI models like gpt-5.2)")
         console.print("  - ANTHROPIC_API_KEY  (for Claude models)")
+        console.print("  - AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_REGION (for Bedrock)")
         console.print("  - GOOGLE_API_KEY     (for Google Gemini models)")
         console.print("  - AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_REGION (for Bedrock models)")
         console.print(
@@ -941,69 +885,9 @@ def create_model(model_name_override: str | None = None) -> BaseChatModel:
             max_tokens=20_000,
         )
     elif provider == "bedrock":
-        from langchain_aws import ChatBedrock
-        from langchain_core.rate_limiters import InMemoryRateLimiter
-        from botocore.config import Config as BotocoreConfig
+        from deepagents_cli.providers import bedrock as bedrock_provider
 
-        bedrock_model_id = model_name
-        if bedrock_model_id.lower().startswith("bedrock:"):
-            bedrock_model_id = bedrock_model_id.split(":", 1)[1]
-
-        retry_mode = os.environ.get("BEDROCK_RETRY_MODE") or os.environ.get(
-            "AWS_RETRY_MODE", "adaptive"
-        )
-        max_attempts = _parse_int_env(
-            "BEDROCK_MAX_ATTEMPTS", _parse_int_env("AWS_MAX_ATTEMPTS", 3)
-        )
-        max_pool_connections = _parse_int_env("BEDROCK_MAX_POOL_CONNECTIONS", 10)
-        requests_per_second = _parse_float_env("DEEPAGENTS_BEDROCK_RPS")
-        max_bucket_size = _parse_float_env("DEEPAGENTS_BEDROCK_BURST")
-        temperature = _parse_float_env("BEDROCK_TEMPERATURE")
-        max_tokens = _parse_int_env("BEDROCK_MAX_TOKENS", 1024)
-        top_p = _parse_float_env("BEDROCK_TOP_P")
-        top_k = _parse_optional_int_env("BEDROCK_TOP_K")
-        stop_sequences = _parse_list_env("BEDROCK_STOP")
-        thinking_enabled = _parse_bool_env("BEDROCK_THINKING")
-        thinking_budget = _parse_int_env("BEDROCK_THINKING_BUDGET", 4096)
-
-        if temperature is None and top_p is None:
-            temperature = 0.3
-        if temperature is not None and top_p is not None:
-            top_p = None
-        if thinking_enabled:
-            temperature = 1.0
-            top_p = None
-            top_k = None
-
-        rate_limiter = None
-        if requests_per_second is not None:
-            rate_limiter = InMemoryRateLimiter(
-                requests_per_second=requests_per_second,
-                max_bucket_size=max_bucket_size or requests_per_second,
-            )
-
-        model_kwargs = {}
-        if top_p is not None:
-            model_kwargs["top_p"] = top_p
-        if top_k is not None:
-            model_kwargs["top_k"] = top_k
-        if thinking_enabled:
-            model_kwargs["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
-
-        bedrock_config = BotocoreConfig(
-            retries={"mode": retry_mode, "max_attempts": max_attempts},
-            max_pool_connections=max_pool_connections,
-        )
-
-        model = ChatBedrock(
-            model_id=bedrock_model_id,
-            config=bedrock_config,
-            rate_limiter=rate_limiter,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            stop=stop_sequences,
-            model_kwargs=model_kwargs or None,
-        )
+        model = bedrock_provider.create_bedrock_model(model_name)
     elif provider == "google":
         from langchain_google_genai import ChatGoogleGenerativeAI
 

@@ -21,6 +21,12 @@ uv tool install deepagents-cli
 deepagents
 ```
 
+## Fork Notice (Bedrock Support)
+
+**This fork carries Bedrock support and is the required CLI in r-env installs.** Use the local fork unless you explicitly set `DEEPAGENTS_LOCAL=0` to force PyPI. See `FORK_PROTOCOL.md` at the repo root for the canonical workflow.
+
+Bedrock provider implementation lives in `libs/cli/deepagents_cli/providers/bedrock.py` with wiring in `libs/cli/deepagents_cli/config.py`.
+
 ## 🤔 What is this?
 
 Using an LLM to call tools in a loop is the simplest form of an agent. This architecture, however, can yield agents that are "shallow" and fail to plan and act over longer, more complex tasks.

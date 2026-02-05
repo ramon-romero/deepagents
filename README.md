@@ -12,6 +12,12 @@
   <h3>The batteries-included agent harness.</h3>
 </div>
 
+> [!IMPORTANT]
+> **FORK NOTICE** — This repo is a fork to add **AWS Bedrock** support.  
+> Always use the **local CLI fork** at `~/src/deepagents/libs/cli`.  
+> **Do not install from PyPI** unless explicitly instructed.  
+> Override only with `DEEPAGENTS_LOCAL=0`.
+
 <div align="center">
   <a href="https://opensource.org/licenses/MIT" target="_blank"><img src="https://img.shields.io/pypi/l/deepagents" alt="PyPI - License"></a>
   <a href="https://pypistats.org/packages/deepagents" target="_blank"><img src="https://img.shields.io/pepy/dt/deepagents" alt="PyPI - Downloads"></a>
