@@ -14,8 +14,7 @@
 
 > [!IMPORTANT]
 > **FORK NOTICE** — This repo is a fork to add **AWS Bedrock** support.  
-> Always use the **local CLI fork** at `~/src/deepagents/libs/cli`.  
-> **Do not install from PyPI** unless explicitly instructed.  
+> Canonical fork rules live in `workflow.cue` at the repo root.  
 > Override only with `DEEPAGENTS_LOCAL=0`.
 
 <div align="center">
